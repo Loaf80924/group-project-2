@@ -1,0 +1,105 @@
+import requests
+import sqlite3
+import openai
+import textwrap
+import time
+
+openai.api_key = "YOUR_OPENAI_API_KEY"
+
+DB_NAME = 'research_assistant.db'
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS queries (
+            id INTEGER PRIMARY KEY,
+            query TEXT NOT NULL,
+            timestamp REAL NOT NULL
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS articles (
+            id INTEGER PRIMARY KEY,
+            query_id INTEGER,
+            title TEXT,
+            authors TEXT,
+            doi TEXT,
+            summary TEXT,
+            citation TEXT,
+            FOREIGN KEY(query_id) REFERENCES queries(id)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def search_scholarly(query, max_results=5):
+    url = 'https://api.crossref.org/works'
+    params = {'query.title': query, 'rows': max_results}
+    res = requests.get(url, params=params)
+    res.raise_for_status()
+    items = res.json().get('message', {}).get('items', [])
+    results = []
+    for item in items:
+        title = item.get('title', ['No title'])[0]
+        authors = ', '.join([f"{a.get('given','')} {a.get('family','')}" for a in item.get('author', [])])
+        doi = item.get('DOI', '')
+        results.append({'title': title, 'authors': authors, 'doi': doi})
+    return results
+
+def summarize_article(title, authors, doi):
+    prompt = f"Summarize the academic paper titled '{title}' by {authors}. DOI: {doi}. Provide key findings, methodology, and conclusion in 3 sentences."
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=200
+    )
+    summary = response.choices[0].message.content.strip()
+    return summary
+
+def format_citation(title, authors, doi):
+    year = time.gmtime().tm_year
+    citation = f"{authors} ({year}). {title}. https://doi.org/{doi}"
+    return citation
+
+def save_to_db(query, articles):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    ts = time.time()
+    c.execute('INSERT INTO queries (query, timestamp) VALUES (?, ?)', (query, ts))
+    qid = c.lastrowid
+    for art in articles:
+        c.execute('''
+            INSERT INTO articles (query_id, title, authors, doi, summary, citation)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (qid, art['title'], art['authors'], art['doi'], art['summary'], art['citation']))
+    conn.commit()
+    conn.close()
+
+def main():
+    print("Welcome to the AI Chatbot for Academic Research Assistance")
+    init_db()
+    while True:
+        query = input("\nEnter your research query (or 'exit' to quit): ")
+        if query.lower() in ['exit', 'quit']:
+            print("Goodbye!")
+            break
+        print("\nSearching for relevant articles...")
+        try:
+            hits = search_scholarly(query)
+            enriched = []
+            for idx, art in enumerate(hits, 1):
+                print(f"\n[{idx}] {art['title']} by {art['authors']} (DOI: {art['doi']})")
+                summary = summarize_article(art['title'], art['authors'], art['doi'])
+                citation = format_citation(art['title'], art['authors'], art['doi'])
+                enriched.append({**art, 'summary': summary, 'citation': citation})
+                print(textwrap.fill(f"Summary: {summary}", width=80))
+                print(f"Citation (APA): {citation}")
+
+            save_to_db(query, enriched)
+        except Exception as e:
+            print(f"Error during research process: {e}")
+
+if __name__ == '__main__':
+    main()h
